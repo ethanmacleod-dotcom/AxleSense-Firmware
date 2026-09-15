@@ -1,0 +1,18 @@
+# STM32CubeIDE generated build folders
+Debug/
+Release/
+
+# Common generated build artifacts
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.su
+*.cyclo
+
+# OS junk
+Thumbs.db
+.DS_Store
