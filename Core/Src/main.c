@@ -21,8 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "acquisition.h"
-#include "rs485_test.h"
+#include "app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -89,7 +88,7 @@ int main(void)
   MX_SPI1_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  Acquisition_Init(&hspi1);
+  App_Init(&hspi1, &huart2);
 
   /* USER CODE END 2 */
 
@@ -97,12 +96,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 while (1)
 {
-    if (Acquisition_IsComplete() != 0U)
-    {
-        RS485_TestProcess(&huart2);
-        continue;
-    }
-    Acquisition_Process();
+    App_Process();
 }
     /* USER CODE END WHILE */
 
