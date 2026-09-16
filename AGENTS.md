@@ -16,21 +16,34 @@ The current hardware is a working prototype moving toward a deployable productio
 * Firmware source is also edited using VS Code and Codex
 * Logger will ultimately be a Raspberry Pi communicating with multiple nodes over RS-485
 
-## Current sensor channels
+## Sensor channel configuration
 
-AD7124-4 channel usage:
+### Physical AxleSense PCB wiring
 
-* CH0: Accelerometer X — AIN0 to AVSS
-* CH1: Accelerometer Y — AIN1 to AVSS
-* CH2: Accelerometer Z — AIN2 to AVSS
-* CH3: Strain — AIN4 to AIN3
+The physical PCB sensor connections are:
 
-Typical gain configuration:
+- CH0: Accelerometer X — AIN0 to AVSS
+- CH1: Accelerometer Y — AIN1 to AVSS
+- CH2: Accelerometer Z — AIN2 to AVSS
+- CH3: Strain — differential input using AIN4 and AIN5
 
-* Accelerometer channels: gain = 1
-* Strain channel: gain = 16
+The strain bridge is physically connected to the AIN4/AIN5 differential pair. Do not change this assumed hardware mapping without checking the schematic.
 
-Do not change these assignments or gains unless explicitly requested.
+ADC gain, enabled channels, filter settings, and sampling configuration are firmware-configurable and should not be confused with the physical PCB wiring.
+
+### Current known-good firmware baseline
+
+The current committed firmware is a special strain/noise-test configuration:
+
+- Only AD7124 channel 3 is enabled.
+- Channel 3 is mapped AIN4 versus AIN5.
+- Channel 3 currently uses gain = 64.
+- Accelerometer channels are disabled.
+- This configuration has been demonstrated working on the physical PCB.
+
+Do not change the current ADC mapping, enabled channels, gain, filter, or setup values during structural refactoring.
+
+The production multi-channel acquisition configuration will be deliberately implemented later.
 
 ## Current communications
 
