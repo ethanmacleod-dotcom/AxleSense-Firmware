@@ -1,8 +1,18 @@
 #include "config_storage.h"
 
+#include "main.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+#define CONFIG_STORAGE_EXPECTED_A_START             UINT32_C(0x08040000)
+#define CONFIG_STORAGE_EXPECTED_A_END               UINT32_C(0x08060000)
+#define CONFIG_STORAGE_EXPECTED_B_START             UINT32_C(0x08060000)
+#define CONFIG_STORAGE_EXPECTED_B_END               UINT32_C(0x08080000)
+#define CONFIG_STORAGE_HEADER_PROGRAM_SIZE          44U
+#define CONFIG_STORAGE_COMMIT_OFFSET                44U
+#define CONFIG_STORAGE_ERASE_SECTOR_OK              UINT32_C(0xFFFFFFFF)
 
 extern uint8_t __config_a_start__;
 extern uint8_t __config_a_end__;
@@ -14,6 +24,13 @@ _Static_assert(CONFIG_RECORD_AXLESENSE_V1_PAYLOAD_SIZE ==
                "Record and node payload sizes must match");
 _Static_assert(CONFIG_STORAGE_V1_RECORD_SIZE == 304U,
                "Frozen V1 meaningful record size must be 304 bytes");
+_Static_assert((CONFIG_STORAGE_HEADER_PROGRAM_SIZE % 4U) == 0U,
+               "Header programming length must be word aligned");
+_Static_assert((NODE_CONFIG_V1_PAYLOAD_SIZE % 4U) == 0U,
+               "Payload programming length must be word aligned");
+_Static_assert(CONFIG_STORAGE_COMMIT_OFFSET ==
+               CONFIG_STORAGE_HEADER_PROGRAM_SIZE,
+               "Commit word must immediately follow programmed header bytes");
 
 typedef struct
 {
@@ -22,6 +39,19 @@ typedef struct
     uintptr_t b_start;
     uintptr_t b_end;
 } ConfigStorage_Bounds_t;
+
+typedef struct
+{
+    uint8_t payload[NODE_CONFIG_V1_PAYLOAD_SIZE];
+    uint8_t comparison_payload[NODE_CONFIG_V1_PAYLOAD_SIZE];
+    uint8_t encoded_header[CONFIG_RECORD_V1_HEADER_SIZE];
+    uint8_t readback_header[CONFIG_RECORD_V1_HEADER_SIZE];
+    ConfigRecord_Header_t header;
+    ConfigRecord_Header_t readback_decoded_header;
+    NodeConfig_t decoded_config;
+    ConfigStorage_LoadResult_t load_result;
+    ConfigStorage_SlotResult_t final_slot_result;
+} ConfigStorage_SaveWorkspace_t;
 
 static void InitializeSlotResult(ConfigStorage_SlotId_t slot,
                                  ConfigStorage_SlotResult_t *result)
@@ -68,6 +98,101 @@ static bool GetValidatedBounds(ConfigStorage_Bounds_t *bounds)
     }
 
     return true;
+}
+
+static bool WriteLayoutIsExact(const ConfigStorage_Bounds_t *bounds)
+{
+    return (bounds != NULL) &&
+           (bounds->a_start ==
+            (uintptr_t)CONFIG_STORAGE_EXPECTED_A_START) &&
+           (bounds->a_end ==
+            (uintptr_t)CONFIG_STORAGE_EXPECTED_A_END) &&
+           (bounds->b_start ==
+            (uintptr_t)CONFIG_STORAGE_EXPECTED_B_START) &&
+           (bounds->b_end ==
+            (uintptr_t)CONFIG_STORAGE_EXPECTED_B_END);
+}
+
+static uint32_t ReadU32LE(const uint8_t *source)
+{
+    return (uint32_t)source[0] |
+           ((uint32_t)source[1] << 8) |
+           ((uint32_t)source[2] << 16) |
+           ((uint32_t)source[3] << 24);
+}
+
+static bool FlashBytesAreErased(uintptr_t address, size_t length)
+{
+    const uint8_t *flash = (const uint8_t *)address;
+
+    for (size_t i = 0U; i < length; i++)
+    {
+        if (flash[i] != 0xFFU)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool FlashBytesMatch(uintptr_t address,
+                            const uint8_t *expected,
+                            size_t length)
+{
+    const uint8_t *flash = (const uint8_t *)address;
+
+    for (size_t i = 0U; i < length; i++)
+    {
+        if (flash[i] != expected[i])
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static HAL_StatusTypeDef ProgramWords(uintptr_t address,
+                                      const uint8_t *data,
+                                      size_t length,
+                                      uint32_t *failed_address)
+{
+    HAL_StatusTypeDef hal_status = HAL_OK;
+
+    for (size_t offset = 0U; offset < length; offset += 4U)
+    {
+        const uintptr_t program_address = address + offset;
+        const uint32_t word = ReadU32LE(&data[offset]);
+
+        hal_status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                                      (uint32_t)program_address,
+                                      (uint64_t)word);
+        if (hal_status != HAL_OK)
+        {
+            if (failed_address != NULL)
+            {
+                *failed_address = (uint32_t)program_address;
+            }
+            break;
+        }
+    }
+
+    return hal_status;
+}
+
+static uint32_t GetSectorForSlot(ConfigStorage_SlotId_t slot)
+{
+    if (slot == CONFIG_STORAGE_SLOT_A)
+    {
+        return FLASH_SECTOR_6;
+    }
+    if (slot == CONFIG_STORAGE_SLOT_B)
+    {
+        return FLASH_SECTOR_7;
+    }
+
+    return CONFIG_STORAGE_ERASE_SECTOR_OK;
 }
 
 static uintptr_t GetSlotStart(ConfigStorage_SlotId_t slot,
@@ -329,4 +454,318 @@ ConfigStorage_LoadStatus_t ConfigStorage_Load(
     return UseDefaults(CONFIG_STORAGE_LOAD_DEFAULTS_CONFLICT,
                        config,
                        result);
+}
+
+static void InitializeSaveResult(ConfigStorage_SaveResult_t *result)
+{
+    (void)memset(result, 0, sizeof(*result));
+    result->status = CONFIG_STORAGE_SAVE_INVALID_ARGUMENT;
+    result->operation_status = CONFIG_STORAGE_SAVE_INVALID_ARGUMENT;
+    result->previous_active_slot = CONFIG_STORAGE_SLOT_NONE;
+    result->target_slot = CONFIG_STORAGE_SLOT_NONE;
+    result->target_sector = CONFIG_STORAGE_ERASE_SECTOR_OK;
+    result->erase_sector_error = CONFIG_STORAGE_ERASE_SECTOR_OK;
+    result->final_slot_state = CONFIG_STORAGE_SLOT_STATE_NOT_INSPECTED;
+    result->final_record_status = CONFIG_RECORD_STATUS_INVALID_ARGUMENT;
+}
+
+static ConfigStorage_SaveStatus_t FinishBeforeUnlock(
+    ConfigStorage_SaveStatus_t status,
+    ConfigStorage_SaveResult_t *result)
+{
+    result->operation_status = status;
+    result->status = status;
+    return status;
+}
+
+ConfigStorage_SaveStatus_t ConfigStorage_Save(
+    const NodeConfig_t *config,
+    ConfigStorage_SaveResult_t *result)
+{
+    static ConfigStorage_SaveWorkspace_t workspace;
+    ConfigStorage_Bounds_t bounds;
+    FLASH_EraseInitTypeDef erase_init;
+    ConfigStorage_LoadStatus_t load_status;
+    ConfigStorage_SaveStatus_t operation_status;
+    ConfigStorage_SlotResult_t *active_result;
+    uintptr_t target_start;
+    const uint8_t *flash_payload;
+    uint32_t calculated_crc;
+    uint32_t commit_word;
+    HAL_StatusTypeDef hal_status;
+    bool final_inspection_completed;
+
+    if (result == NULL)
+    {
+        return CONFIG_STORAGE_SAVE_INVALID_ARGUMENT;
+    }
+
+    InitializeSaveResult(result);
+    if (config == NULL)
+    {
+        return result->status;
+    }
+
+    if (!NodeConfig_Validate(config))
+    {
+        return FinishBeforeUnlock(CONFIG_STORAGE_SAVE_INVALID_NODE_CONFIG,
+                                  result);
+    }
+
+    if (!NodeConfig_EncodeV1(config, workspace.payload))
+    {
+        return FinishBeforeUnlock(CONFIG_STORAGE_SAVE_ENCODE_FAILURE,
+                                  result);
+    }
+
+    load_status = ConfigStorage_Load(&workspace.decoded_config,
+                                     &workspace.load_result);
+    result->slot_a_before = workspace.load_result.slot_a;
+    result->slot_b_before = workspace.load_result.slot_b;
+
+    if (load_status == CONFIG_STORAGE_LOAD_DEFAULTS_LAYOUT_INVALID)
+    {
+        return FinishBeforeUnlock(CONFIG_STORAGE_SAVE_LAYOUT_UNSAFE, result);
+    }
+    if (load_status == CONFIG_STORAGE_LOAD_DEFAULTS_CONFLICT)
+    {
+        return FinishBeforeUnlock(CONFIG_STORAGE_SAVE_EXISTING_AB_CONFLICT,
+                                  result);
+    }
+    if (load_status == CONFIG_STORAGE_LOAD_INVALID_ARGUMENT)
+    {
+        return FinishBeforeUnlock(
+            CONFIG_STORAGE_SAVE_SLOT_INSPECTION_FAILURE,
+            result);
+    }
+
+    if (!GetValidatedBounds(&bounds) || !WriteLayoutIsExact(&bounds))
+    {
+        return FinishBeforeUnlock(CONFIG_STORAGE_SAVE_LAYOUT_UNSAFE, result);
+    }
+
+    if (load_status == CONFIG_STORAGE_LOAD_DEFAULTS_NO_USABLE_SLOT)
+    {
+        result->previous_active_slot = CONFIG_STORAGE_SLOT_NONE;
+        result->target_slot = CONFIG_STORAGE_SLOT_A;
+        result->new_generation = UINT64_C(1);
+    }
+    else if (load_status == CONFIG_STORAGE_LOAD_PERSISTENT)
+    {
+        result->previous_active_slot = workspace.load_result.selected_slot;
+        if (result->previous_active_slot == CONFIG_STORAGE_SLOT_A)
+        {
+            active_result = &workspace.load_result.slot_a;
+            result->target_slot = CONFIG_STORAGE_SLOT_B;
+        }
+        else if (result->previous_active_slot == CONFIG_STORAGE_SLOT_B)
+        {
+            active_result = &workspace.load_result.slot_b;
+            result->target_slot = CONFIG_STORAGE_SLOT_A;
+        }
+        else
+        {
+            return FinishBeforeUnlock(
+                CONFIG_STORAGE_SAVE_SLOT_INSPECTION_FAILURE,
+                result);
+        }
+
+        if ((active_result->state != CONFIG_STORAGE_SLOT_STATE_USABLE) ||
+            !active_result->generation_available)
+        {
+            return FinishBeforeUnlock(
+                CONFIG_STORAGE_SAVE_SLOT_INSPECTION_FAILURE,
+                result);
+        }
+        result->new_generation = active_result->generation + UINT64_C(1);
+    }
+    else
+    {
+        return FinishBeforeUnlock(
+            CONFIG_STORAGE_SAVE_SLOT_INSPECTION_FAILURE,
+            result);
+    }
+
+    target_start = GetSlotStart(result->target_slot, &bounds);
+    result->target_sector = GetSectorForSlot(result->target_slot);
+    if ((target_start == (uintptr_t)0U) ||
+        ((target_start & (uintptr_t)0x3U) != (uintptr_t)0U) ||
+        (result->target_sector == CONFIG_STORAGE_ERASE_SECTOR_OK))
+    {
+        return FinishBeforeUnlock(CONFIG_STORAGE_SAVE_LAYOUT_UNSAFE, result);
+    }
+
+    if (!ConfigRecord_InitV1Header(
+            &workspace.header,
+            result->new_generation,
+            CONFIG_RECORD_PAYLOAD_SCHEMA_VERSION_V1,
+            CONFIG_RECORD_AXLESENSE_V1_PAYLOAD_SIZE) ||
+        !ConfigRecord_FinalizeV1(&workspace.header, workspace.payload) ||
+        !ConfigRecord_EncodeHeaderV1(&workspace.header,
+                                     workspace.encoded_header) ||
+        (ReadU32LE(&workspace.encoded_header[
+             CONFIG_STORAGE_COMMIT_OFFSET]) !=
+         CONFIG_RECORD_COMMIT_MARKER))
+    {
+        return FinishBeforeUnlock(
+            CONFIG_STORAGE_SAVE_HEADER_PREPARATION_FAILURE,
+            result);
+    }
+
+    hal_status = HAL_FLASH_Unlock();
+    result->unlock_hal_status = (uint32_t)hal_status;
+    if (hal_status != HAL_OK)
+    {
+        result->flash_error = HAL_FLASH_GetError();
+        return FinishBeforeUnlock(CONFIG_STORAGE_SAVE_FLASH_UNLOCK_FAILURE,
+                                  result);
+    }
+
+    operation_status = CONFIG_STORAGE_SAVE_SUCCESS;
+    (void)memset(&erase_init, 0, sizeof(erase_init));
+    erase_init.TypeErase = FLASH_TYPEERASE_SECTORS;
+    erase_init.Banks = FLASH_BANK_1;
+    erase_init.Sector = result->target_sector;
+    erase_init.NbSectors = 1U;
+    erase_init.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+
+    hal_status = HAL_FLASHEx_Erase(&erase_init,
+                                   &result->erase_sector_error);
+    result->erase_hal_status = (uint32_t)hal_status;
+    if ((hal_status != HAL_OK) ||
+        (result->erase_sector_error != CONFIG_STORAGE_ERASE_SECTOR_OK))
+    {
+        operation_status = CONFIG_STORAGE_SAVE_SECTOR_ERASE_FAILURE;
+        goto lock_flash;
+    }
+
+    if (!FlashBytesAreErased(target_start,
+                             CONFIG_STORAGE_V1_RECORD_SIZE))
+    {
+        operation_status = CONFIG_STORAGE_SAVE_ERASE_VERIFICATION_FAILURE;
+        goto lock_flash;
+    }
+
+    hal_status = ProgramWords(target_start,
+                              workspace.encoded_header,
+                              CONFIG_STORAGE_HEADER_PROGRAM_SIZE,
+                              &result->failed_program_address);
+    result->program_hal_status = (uint32_t)hal_status;
+    if (hal_status != HAL_OK)
+    {
+        operation_status = CONFIG_STORAGE_SAVE_HEADER_PROGRAM_FAILURE;
+        goto lock_flash;
+    }
+
+    hal_status = ProgramWords(
+        target_start + CONFIG_RECORD_V1_HEADER_SIZE,
+        workspace.payload,
+        NODE_CONFIG_V1_PAYLOAD_SIZE,
+        &result->failed_program_address);
+    result->program_hal_status = (uint32_t)hal_status;
+    if (hal_status != HAL_OK)
+    {
+        operation_status = CONFIG_STORAGE_SAVE_PAYLOAD_PROGRAM_FAILURE;
+        goto lock_flash;
+    }
+
+    FLASH_FlushCaches();
+
+    (void)memcpy(workspace.readback_header,
+                 (const void *)target_start,
+                 sizeof(workspace.readback_header));
+    if (!FlashBytesMatch(target_start,
+                         workspace.encoded_header,
+                         CONFIG_STORAGE_HEADER_PROGRAM_SIZE) ||
+        !FlashBytesMatch(target_start + CONFIG_RECORD_V1_HEADER_SIZE,
+                         workspace.payload,
+                         NODE_CONFIG_V1_PAYLOAD_SIZE) ||
+        (ReadU32LE(&workspace.readback_header[
+             CONFIG_STORAGE_COMMIT_OFFSET]) !=
+         CONFIG_RECORD_ERASED_FLASH_WORD))
+    {
+        operation_status = CONFIG_STORAGE_SAVE_READBACK_VERIFICATION_FAILURE;
+        goto lock_flash;
+    }
+
+    flash_payload = (const uint8_t *)(
+        target_start + CONFIG_RECORD_V1_HEADER_SIZE);
+    if (!ConfigRecord_DecodeHeaderV1(workspace.readback_header,
+                                     &workspace.readback_decoded_header) ||
+        !ConfigRecord_CalculateRecordCrcV1(
+            &workspace.readback_decoded_header,
+            flash_payload,
+            &calculated_crc) ||
+        (calculated_crc != workspace.readback_decoded_header.crc32))
+    {
+        operation_status = CONFIG_STORAGE_SAVE_CRC_VERIFICATION_FAILURE;
+        goto lock_flash;
+    }
+
+    hal_status = ProgramWords(
+        target_start + CONFIG_STORAGE_COMMIT_OFFSET,
+        &workspace.encoded_header[CONFIG_STORAGE_COMMIT_OFFSET],
+        4U,
+        &result->failed_program_address);
+    result->program_hal_status = (uint32_t)hal_status;
+    if (hal_status != HAL_OK)
+    {
+        operation_status = CONFIG_STORAGE_SAVE_COMMIT_PROGRAM_FAILURE;
+        goto lock_flash;
+    }
+
+    FLASH_FlushCaches();
+
+    commit_word = ReadU32LE((const uint8_t *)(
+        target_start + CONFIG_STORAGE_COMMIT_OFFSET));
+    if (commit_word != CONFIG_RECORD_COMMIT_MARKER)
+    {
+        operation_status = CONFIG_STORAGE_SAVE_COMMIT_PROGRAM_FAILURE;
+    }
+
+lock_flash:
+    result->operation_status = operation_status;
+    result->flash_error = HAL_FLASH_GetError();
+    hal_status = HAL_FLASH_Lock();
+    result->lock_hal_status = (uint32_t)hal_status;
+
+    final_inspection_completed = InspectSlotWithBounds(
+        result->target_slot,
+        &bounds,
+        &workspace.final_slot_result,
+        &workspace.decoded_config);
+    if (final_inspection_completed)
+    {
+        result->final_slot_state = workspace.final_slot_result.state;
+        result->final_record_status =
+            workspace.final_slot_result.record_status;
+    }
+
+    if (hal_status != HAL_OK)
+    {
+        result->status = CONFIG_STORAGE_SAVE_FLASH_LOCK_FAILURE;
+        return result->status;
+    }
+
+    result->status = operation_status;
+    if (operation_status != CONFIG_STORAGE_SAVE_SUCCESS)
+    {
+        return result->status;
+    }
+
+    if (!final_inspection_completed ||
+        (workspace.final_slot_result.state !=
+         CONFIG_STORAGE_SLOT_STATE_USABLE) ||
+        !NodeConfig_EncodeV1(&workspace.decoded_config,
+                             workspace.comparison_payload) ||
+        (memcmp(workspace.payload,
+                workspace.comparison_payload,
+                NODE_CONFIG_V1_PAYLOAD_SIZE) != 0))
+    {
+        result->operation_status =
+            CONFIG_STORAGE_SAVE_FINAL_SLOT_VALIDATION_FAILURE;
+        result->status = CONFIG_STORAGE_SAVE_FINAL_SLOT_VALIDATION_FAILURE;
+    }
+
+    return result->status;
 }
