@@ -217,7 +217,7 @@ The mapping is fixed by the PCB and firmware and is not payload-configurable.
 | `0x031` | 1 | `uint8` | `adc_power_mode` | `2` | Enumeration `0–2` | Logger |
 | `0x032` | 1 | `uint8` | `acquisition_mode` | `0` | Supported enumeration only | Logger |
 | `0x033` | 1 | `uint8` | `adc_mapping_version` | `1` | Must be supported | Firmware/manufacturing |
-| `0x034` | 4 | `uint8[4]` | `channel_gain` | `{1,1,1,16}` | Each is `1,2,4,8,16,32,64,128` | Logger, calibration-protected |
+| `0x034` | 4 | `uint8[4]` | `channel_gain` | `{1,1,1,64}` | Each is `1,2,4,8,16,32,64,128` | Logger, calibration-protected |
 | `0x038` | 4 | `uint8[4]` | `filter_mode` | `{0,0,0,0}` | Supported semantic modes only | Logger |
 | `0x03C` | 4 | `uint8[4]` | `filter_options` | `{0,0,0,0}` | Defined bits only | Logger |
 | `0x040` | 16 | `uint32[4]` | `output_data_rate_millihz` | `{0,0,0,0}` | Firmware-supported semantic rates | Logger |

@@ -203,7 +203,7 @@ void NodeConfig_SetDefaults(NodeConfig_t *config)
     config->channel_gain[NODE_CONFIG_CHANNEL_ACCEL_X] = 1U;
     config->channel_gain[NODE_CONFIG_CHANNEL_ACCEL_Y] = 1U;
     config->channel_gain[NODE_CONFIG_CHANNEL_ACCEL_Z] = 1U;
-    config->channel_gain[NODE_CONFIG_CHANNEL_STRAIN] = 16U;
+    config->channel_gain[NODE_CONFIG_CHANNEL_STRAIN] = 64U;
     config->startup_settling_conversions = 256U;
     config->analog_reference_config_version =
         NODE_CONFIG_ANALOG_REFERENCE_VERSION;
