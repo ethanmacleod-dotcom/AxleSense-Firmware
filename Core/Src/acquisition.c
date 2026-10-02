@@ -226,6 +226,11 @@ void Acquisition_Process(void)
         return;
     }
 
+    if (noise_done != 0U)
+    {
+        return;
+    }
+
     /* Allow the digital filter to settle before collecting statistics. */
     if (noise_skip > 0U)
     {
