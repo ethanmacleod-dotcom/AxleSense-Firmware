@@ -3,11 +3,19 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define ADC_RUNTIME_CONFIG_ACCEL_X_ENABLED_WORD  0x8011U
-#define ADC_RUNTIME_CONFIG_ACCEL_Y_ENABLED_WORD  0x8031U
-#define ADC_RUNTIME_CONFIG_ACCEL_Z_ENABLED_WORD  0x8051U
-#define ADC_RUNTIME_CONFIG_STRAIN_ENABLED_WORD   0x9085U
-#define ADC_RUNTIME_CONFIG_CHANNEL_ENABLE_BIT    0x8000U
+/*
+ * V1 PCB mapping:
+ *   logical CH0 / accel X = AIN2 to AVSS, Setup0
+ *   logical CH1 / accel Y = AIN3 to AVSS, Setup0
+ *   logical CH2 / accel Z = AIN0 to AVSS, Setup0
+ *   logical CH3 / strain  = AIN4 to AIN5, Setup1
+ * AIN1 is unused.
+ */
+#define ADC_RUNTIME_CONFIG_ACCEL_X_AIN2_AVSS_WORD  0x8051U
+#define ADC_RUNTIME_CONFIG_ACCEL_Y_AIN3_AVSS_WORD  0x8071U
+#define ADC_RUNTIME_CONFIG_ACCEL_Z_AIN0_AVSS_WORD  0x8011U
+#define ADC_RUNTIME_CONFIG_STRAIN_AIN4_AIN5_WORD   0x9085U
+#define ADC_RUNTIME_CONFIG_CHANNEL_ENABLE_BIT      0x8000U
 
 extern AD7124_RegisterTypeDef configA;
 
@@ -75,20 +83,20 @@ AdcRuntimeConfig_Status_t AdcRuntimeConfig_Build(
     adc_config->channels[NODE_CONFIG_CHANNEL_ACCEL_X] =
         ((node_config->enabled_channel_mask &
           (1U << NODE_CONFIG_CHANNEL_ACCEL_X)) != 0U) ?
-        ADC_RUNTIME_CONFIG_ACCEL_X_ENABLED_WORD : 0x0000U;
+        ADC_RUNTIME_CONFIG_ACCEL_X_AIN2_AVSS_WORD : 0x0000U;
     adc_config->channels[NODE_CONFIG_CHANNEL_ACCEL_Y] =
         ((node_config->enabled_channel_mask &
           (1U << NODE_CONFIG_CHANNEL_ACCEL_Y)) != 0U) ?
-        ADC_RUNTIME_CONFIG_ACCEL_Y_ENABLED_WORD : 0x0000U;
+        ADC_RUNTIME_CONFIG_ACCEL_Y_AIN3_AVSS_WORD : 0x0000U;
     adc_config->channels[NODE_CONFIG_CHANNEL_ACCEL_Z] =
         ((node_config->enabled_channel_mask &
           (1U << NODE_CONFIG_CHANNEL_ACCEL_Z)) != 0U) ?
-        ADC_RUNTIME_CONFIG_ACCEL_Z_ENABLED_WORD : 0x0000U;
+        ADC_RUNTIME_CONFIG_ACCEL_Z_AIN0_AVSS_WORD : 0x0000U;
     adc_config->channels[NODE_CONFIG_CHANNEL_STRAIN] =
         ((node_config->enabled_channel_mask &
           (1U << NODE_CONFIG_CHANNEL_STRAIN)) != 0U) ?
-        ADC_RUNTIME_CONFIG_STRAIN_ENABLED_WORD :
-        (uint16_t)(ADC_RUNTIME_CONFIG_STRAIN_ENABLED_WORD &
+        ADC_RUNTIME_CONFIG_STRAIN_AIN4_AIN5_WORD :
+        (uint16_t)(ADC_RUNTIME_CONFIG_STRAIN_AIN4_AIN5_WORD &
                    ~ADC_RUNTIME_CONFIG_CHANNEL_ENABLE_BIT);
 
     return ADC_RUNTIME_CONFIG_OK;

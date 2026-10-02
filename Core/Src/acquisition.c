@@ -9,6 +9,9 @@ extern uint32_t AD7124_ChannelSamples[AD7124_ENABLED_CHANNELS];
 extern volatile uint8_t AD7124_LastActiveChannel;
 
 static AD7124_RegisterTypeDef runtime_adc_config;
+static uint8_t runtime_enabled_channel_mask = 0U;
+static uint32_t last_samples[NODE_CONFIG_CHANNEL_COUNT] = {0U};
+static uint32_t accepted_sample_counts[NODE_CONFIG_CHANNEL_COUNT] = {0U};
 
 /* ADC initialization status: AD7124_OK should be 0. */
 volatile int32_t adc_runtime_config_status = -99;
@@ -86,6 +89,8 @@ void Acquisition_Init(
         adc_config_status = -1;
         return;
     }
+
+    runtime_enabled_channel_mask = node_config->enabled_channel_mask;
 
     /*
      * PCB AD7124 bring-up test.
@@ -189,29 +194,37 @@ void Acquisition_Process(void)
         return;
     }
 
-    adc_last_channel = (uint8_t)(status_reg & 0x0FU);
-    if (adc_last_channel != 3U)
+    if (AD7124_ReadSampleData(&AD7124_Handler) != AD7124_OK)
     {
         adc_read_errors++;
         return;
     }
 
-    /*
-     * Read DATA directly after the STATUS read. This matches the previous-PCB
-     * debug harness and avoids doing a second STATUS read before DATA.
-     */
-    uint32_t raw = 0U;
-    if (AD7124_ReadRegister(
-            &AD7124_Handler,
-            AD7124_DATA_REG,
-            3U,
-            &raw) != AD7124_OK)
+    const uint8_t channel = AD7124_LastActiveChannel;
+    if (channel >= NODE_CONFIG_CHANNEL_COUNT)
     {
         adc_read_errors++;
         return;
     }
+
+    if ((runtime_enabled_channel_mask & (1U << channel)) == 0U)
+    {
+        adc_read_errors++;
+        return;
+    }
+
+    const uint32_t raw = AD7124_ChannelSamples[channel];
+    last_samples[channel] = raw;
+    accepted_sample_counts[channel]++;
+
+    adc_last_channel = channel;
     adc_last_raw = raw;
     adc_samples_total++;
+
+    if (channel != NODE_CONFIG_CHANNEL_STRAIN)
+    {
+        return;
+    }
 
     /* Allow the digital filter to settle before collecting statistics. */
     if (noise_skip > 0U)
