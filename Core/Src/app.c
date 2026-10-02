@@ -15,7 +15,7 @@ void App_Init(SPI_HandleTypeDef *spi, UART_HandleTypeDef *rs485_uart_handle)
         &runtime_config,
         &runtime_config_load_result);
 
-    Acquisition_Init(spi);
+    Acquisition_Init(spi, &runtime_config);
     rs485_uart = rs485_uart_handle;
 }
 

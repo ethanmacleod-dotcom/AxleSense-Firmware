@@ -2,14 +2,16 @@
 
 #include "main.h"
 #include "ad7124.h"
-#include "ad7124_config.h"
+#include "adc_runtime_config.h"
 
 extern AD7124_ConfigTypeDef AD7124_Handler;
 extern uint32_t AD7124_ChannelSamples[AD7124_ENABLED_CHANNELS];
-extern AD7124_RegisterTypeDef configA;
 extern volatile uint8_t AD7124_LastActiveChannel;
 
+static AD7124_RegisterTypeDef runtime_adc_config;
+
 /* ADC initialization status: AD7124_OK should be 0. */
+volatile int32_t adc_runtime_config_status = -99;
 volatile int32_t adc_reset_status  = -99;
 volatile int32_t adc_config_status = -99;
 
@@ -69,8 +71,22 @@ static double NoiseSqrt(double x)
     return g;
 }
 
-void Acquisition_Init(SPI_HandleTypeDef *spi)
+void Acquisition_Init(
+    SPI_HandleTypeDef *spi,
+    const NodeConfig_t *node_config)
 {
+    adc_runtime_config_status = -99;
+
+    adc_runtime_config_status = (int32_t)AdcRuntimeConfig_Build(
+        node_config,
+        &runtime_adc_config);
+
+    if (adc_runtime_config_status != (int32_t)ADC_RUNTIME_CONFIG_OK)
+    {
+        adc_config_status = -1;
+        return;
+    }
+
     /*
      * PCB AD7124 bring-up test.
      *
@@ -90,7 +106,7 @@ void Acquisition_Init(SPI_HandleTypeDef *spi)
     adc_reset_status =
         (int32_t)AD7124_Reset(&AD7124_Handler, 100U);
     adc_config_status =
-        (int32_t)AD7124_Config(&AD7124_Handler, &configA);
+        (int32_t)AD7124_Config(&AD7124_Handler, &runtime_adc_config);
 
     /*
      * Fixed-order readback. These are the PCB-specific values we care about:

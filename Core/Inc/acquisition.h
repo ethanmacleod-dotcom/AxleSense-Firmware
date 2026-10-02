@@ -5,8 +5,10 @@
 extern "C" {
 #endif
 
+#include "node_config.h"
 #include "stm32f4xx_hal.h"
 
+extern volatile int32_t adc_runtime_config_status;
 extern volatile int32_t adc_reset_status;
 extern volatile int32_t adc_config_status;
 
@@ -32,7 +34,9 @@ extern volatile double noise_mean_uV;
 extern volatile double noise_std_uV;
 extern volatile double noise_pp_uV;
 
-void Acquisition_Init(SPI_HandleTypeDef *spi);
+void Acquisition_Init(
+    SPI_HandleTypeDef *spi,
+    const NodeConfig_t *node_config);
 void Acquisition_Process(void);
 uint8_t Acquisition_IsComplete(void);
 
