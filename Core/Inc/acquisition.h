@@ -8,6 +8,14 @@ extern "C" {
 #include "node_config.h"
 #include "stm32f4xx_hal.h"
 
+typedef struct
+{
+    uint32_t sequence;
+    uint32_t timestamp_ms;
+    uint8_t enabled_channel_mask;
+    uint32_t raw[NODE_CONFIG_CHANNEL_COUNT];
+} AcquisitionFrame_t;
+
 extern volatile int32_t adc_runtime_config_status;
 extern volatile int32_t adc_reset_status;
 extern volatile int32_t adc_config_status;
@@ -39,6 +47,9 @@ void Acquisition_Init(
     const NodeConfig_t *node_config);
 void Acquisition_Process(void);
 uint8_t Acquisition_IsComplete(void);
+uint8_t Acquisition_GetLatestFrame(
+    AcquisitionFrame_t *frame,
+    uint32_t *last_sequence);
 
 #ifdef __cplusplus
 }

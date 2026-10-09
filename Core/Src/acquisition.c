@@ -4,6 +4,8 @@
 #include "ad7124.h"
 #include "adc_runtime_config.h"
 
+#include <stddef.h>
+
 extern AD7124_ConfigTypeDef AD7124_Handler;
 extern uint32_t AD7124_ChannelSamples[AD7124_ENABLED_CHANNELS];
 extern volatile uint8_t AD7124_LastActiveChannel;
@@ -12,6 +14,9 @@ static AD7124_RegisterTypeDef runtime_adc_config;
 static uint8_t runtime_enabled_channel_mask = 0U;
 static uint32_t last_samples[NODE_CONFIG_CHANNEL_COUNT] = {0U};
 static uint32_t accepted_sample_counts[NODE_CONFIG_CHANNEL_COUNT] = {0U};
+static uint8_t frame_seen_mask = 0U;
+static uint8_t runtime_frame_boundary_channel = 0xFFU;
+static AcquisitionFrame_t latest_frame;
 
 /* ADC initialization status: AD7124_OK should be 0. */
 volatile int32_t adc_runtime_config_status = -99;
@@ -91,7 +96,16 @@ void Acquisition_Init(
     }
 
     runtime_enabled_channel_mask = node_config->enabled_channel_mask;
-
+    runtime_frame_boundary_channel = 0xFFU;
+    for (uint8_t channel = 0U;
+         channel < NODE_CONFIG_CHANNEL_COUNT;
+         channel++)
+    {
+        if ((runtime_enabled_channel_mask & (1U << channel)) != 0U)
+        {
+            runtime_frame_boundary_channel = channel;
+        }
+    }
     /*
      * PCB AD7124 bring-up test.
      *
@@ -221,6 +235,34 @@ void Acquisition_Process(void)
     adc_last_raw = raw;
     adc_samples_total++;
 
+    frame_seen_mask |= (uint8_t)(1U << channel);
+
+    if (channel == runtime_frame_boundary_channel)
+    {
+        if ((frame_seen_mask & runtime_enabled_channel_mask) ==
+            runtime_enabled_channel_mask)
+        {
+            uint32_t next_sequence = latest_frame.sequence + 1U;
+            if (next_sequence == 0U)
+            {
+                next_sequence = 1U;
+            }
+
+            latest_frame.timestamp_ms = HAL_GetTick();
+            latest_frame.enabled_channel_mask =
+                runtime_enabled_channel_mask;
+            for (uint8_t i = 0U;
+                 i < NODE_CONFIG_CHANNEL_COUNT;
+                 i++)
+            {
+                latest_frame.raw[i] = last_samples[i];
+            }
+            latest_frame.sequence = next_sequence;
+        }
+
+        frame_seen_mask = 0U;
+    }
+
     if (channel != NODE_CONFIG_CHANNEL_STRAIN)
     {
         return;
@@ -306,4 +348,25 @@ void Acquisition_Process(void)
 uint8_t Acquisition_IsComplete(void)
 {
     return noise_done;
+}
+
+uint8_t Acquisition_GetLatestFrame(
+    AcquisitionFrame_t *frame,
+    uint32_t *last_sequence)
+{
+    if ((frame == NULL) || (last_sequence == NULL))
+    {
+        return 0U;
+    }
+
+    if ((latest_frame.sequence == 0U) ||
+        (latest_frame.sequence == *last_sequence))
+    {
+        return 0U;
+    }
+
+    *frame = latest_frame;
+    *last_sequence = latest_frame.sequence;
+
+    return 1U;
 }
