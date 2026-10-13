@@ -133,7 +133,7 @@ void Acquisition_Init(
      *   ID          approximately 0x06
      *   CH3_MAP     0x9085  = Setup1, AIN4 vs AIN5
      *   CFG1        0x087E  = bipolar, buffered, AVDD ref, gain 64
-     *   FILT1       0x460010
+     *   FILT1       0x460015
      *   ADC_CONTROL 0x0080
      *   ERROR_EN    0x000004
      *

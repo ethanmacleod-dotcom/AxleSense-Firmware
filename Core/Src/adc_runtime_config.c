@@ -16,6 +16,8 @@
 #define ADC_RUNTIME_CONFIG_ACCEL_Z_AIN0_AVSS_WORD  0x8011U
 #define ADC_RUNTIME_CONFIG_STRAIN_AIN4_AIN5_WORD   0x9085U
 #define ADC_RUNTIME_CONFIG_CHANNEL_ENABLE_BIT      0x8000U
+#define ADC_RUNTIME_CONFIG_ACCEL_FILTER_WORD       0x460003U
+#define ADC_RUNTIME_CONFIG_STRAIN_FILTER_WORD      0x460015U
 
 extern AD7124_RegisterTypeDef configA;
 
@@ -79,6 +81,9 @@ AdcRuntimeConfig_Status_t AdcRuntimeConfig_Build(
     }
 
     *adc_config = configA;
+
+    adc_config->filters[0] = ADC_RUNTIME_CONFIG_ACCEL_FILTER_WORD;
+    adc_config->filters[1] = ADC_RUNTIME_CONFIG_STRAIN_FILTER_WORD;
 
     adc_config->channels[NODE_CONFIG_CHANNEL_ACCEL_X] =
         ((node_config->enabled_channel_mask &
