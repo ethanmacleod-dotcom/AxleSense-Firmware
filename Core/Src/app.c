@@ -2,6 +2,7 @@
 
 #include "acquisition.h"
 #include "config_storage.h"
+#include "rs485_protocol.h"
 
 static NodeConfig_t runtime_config;
 static ConfigStorage_LoadResult_t runtime_config_load_result;
@@ -16,9 +17,11 @@ void App_Init(SPI_HandleTypeDef *spi, UART_HandleTypeDef *rs485_uart_handle)
         &runtime_config_load_result);
 
     Acquisition_Init(spi, &runtime_config);
+    Rs485Protocol_Init(rs485_uart_handle, &runtime_config);
 }
 
 void App_Process(void)
 {
     Acquisition_Process();
+    Rs485Protocol_Process();
 }
