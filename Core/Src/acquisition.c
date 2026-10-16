@@ -370,3 +370,24 @@ uint8_t Acquisition_GetLatestFrame(
 
     return 1U;
 }
+
+uint8_t Acquisition_GetLatestSequence(uint32_t *sequence)
+{
+    if ((sequence == NULL) || (latest_frame.sequence == 0U))
+    {
+        return 0U;
+    }
+
+    *sequence = latest_frame.sequence;
+    return 1U;
+}
+
+uint32_t Acquisition_GetReadErrorCount(void)
+{
+    return adc_read_errors;
+}
+
+uint8_t Acquisition_GetEnabledChannelMask(void)
+{
+    return runtime_enabled_channel_mask;
+}

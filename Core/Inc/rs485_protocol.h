@@ -10,7 +10,8 @@ extern "C" {
 
 void Rs485Protocol_Init(
     UART_HandleTypeDef *uart,
-    const NodeConfig_t *node_config);
+    const NodeConfig_t *node_config,
+    uint32_t config_generation);
 void Rs485Protocol_Process(void);
 
 #ifdef __cplusplus

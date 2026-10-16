@@ -50,6 +50,9 @@ uint8_t Acquisition_IsComplete(void);
 uint8_t Acquisition_GetLatestFrame(
     AcquisitionFrame_t *frame,
     uint32_t *last_sequence);
+uint8_t Acquisition_GetLatestSequence(uint32_t *sequence);
+uint32_t Acquisition_GetReadErrorCount(void);
+uint8_t Acquisition_GetEnabledChannelMask(void);
 
 #ifdef __cplusplus
 }
