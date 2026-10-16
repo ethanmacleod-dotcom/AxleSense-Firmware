@@ -12,9 +12,10 @@
 #define RS485_PROTOCOL_SYNC1                    0x55U
 #define RS485_PROTOCOL_MESSAGE_PING             0x01U
 #define RS485_PROTOCOL_MESSAGE_GET_STATUS       0x02U
+#define RS485_PROTOCOL_MESSAGE_READ_FRAMES      0x03U
 #define RS485_PROTOCOL_MESSAGE_PONG             0x81U
 #define RS485_PROTOCOL_MESSAGE_STATUS           0x82U
-#define RS485_PROTOCOL_STATUS_OK                0x00U
+#define RS485_PROTOCOL_MESSAGE_FRAME_DATA       0x83U
 #define RS485_PROTOCOL_NODE_STATE_RUNNING       0x02U
 #define RS485_PROTOCOL_MAX_PAYLOAD              1024U
 #define RS485_PROTOCOL_HEADER_AFTER_SYNC_SIZE   7U
@@ -22,9 +23,32 @@
 #define RS485_PROTOCOL_PONG_PACKET_SIZE         29U
 #define RS485_PROTOCOL_STATUS_PAYLOAD_SIZE      52U
 #define RS485_PROTOCOL_STATUS_PACKET_SIZE       63U
+#define RS485_PROTOCOL_READ_FRAMES_PAYLOAD_SIZE 6U
+#define RS485_PROTOCOL_FRAME_DATA_METADATA_SIZE 15U
+#define RS485_PROTOCOL_WIRE_FRAME_SIZE          48U
+#define RS485_PROTOCOL_MAX_FRAMES_PER_RESPONSE  20U
+#define RS485_PROTOCOL_FRAME_DATA_MAX_PAYLOAD_SIZE \
+    (RS485_PROTOCOL_FRAME_DATA_METADATA_SIZE + \
+     (RS485_PROTOCOL_WIRE_FRAME_SIZE * \
+      RS485_PROTOCOL_MAX_FRAMES_PER_RESPONSE))
+#define RS485_PROTOCOL_FRAME_DATA_MAX_PACKET_SIZE \
+    (2U + RS485_PROTOCOL_HEADER_AFTER_SYNC_SIZE + \
+     RS485_PROTOCOL_FRAME_DATA_MAX_PAYLOAD_SIZE + 2U)
 #define RS485_PROTOCOL_NO_SEQUENCE              0xFFFFFFFFU
 #define RS485_PROTOCOL_CRC_INITIAL              0xFFFFU
 #define RS485_PROTOCOL_CRC_POLYNOMIAL           0x1021U
+
+typedef enum
+{
+    RS485_PROTOCOL_STATUS_OK = 0x00U,
+    RS485_PROTOCOL_STATUS_UNKNOWN_COMMAND = 0x01U,
+    RS485_PROTOCOL_STATUS_INVALID_LENGTH = 0x02U,
+    RS485_PROTOCOL_STATUS_INVALID_STATE = 0x03U,
+    RS485_PROTOCOL_STATUS_INVALID_CONFIG = 0x04U,
+    RS485_PROTOCOL_STATUS_DATA_NOT_AVAILABLE = 0x05U,
+    RS485_PROTOCOL_STATUS_INTERNAL_ERROR = 0x06U,
+    RS485_PROTOCOL_STATUS_INVALID_ARGUMENT = 0x07U
+} Rs485Protocol_Status_t;
 
 _Static_assert(
     RS485_PROTOCOL_PONG_PACKET_SIZE ==
@@ -37,6 +61,23 @@ _Static_assert(
         (2U + RS485_PROTOCOL_HEADER_AFTER_SYNC_SIZE +
          RS485_PROTOCOL_STATUS_PAYLOAD_SIZE + 2U),
     "STATUS packet size must be 63 bytes");
+
+_Static_assert(
+    RS485_PROTOCOL_FRAME_DATA_MAX_PAYLOAD_SIZE == 975U,
+    "maximum FRAME_DATA payload must be 975 bytes");
+
+_Static_assert(
+    RS485_PROTOCOL_FRAME_DATA_MAX_PAYLOAD_SIZE <=
+        RS485_PROTOCOL_MAX_PAYLOAD,
+    "FRAME_DATA payload must fit the protocol envelope");
+
+_Static_assert(
+    RS485_PROTOCOL_FRAME_DATA_MAX_PACKET_SIZE == 986U,
+    "maximum FRAME_DATA packet must be 986 bytes");
+
+_Static_assert(
+    NODE_CONFIG_CHANNEL_COUNT == 4U,
+    "V1 wire frames require four logical channels");
 
 typedef enum
 {
@@ -63,8 +104,11 @@ static Rs485Protocol_RxState_t rx_state = RS485_RX_SYNC0;
 
 static volatile uint8_t pending_response_type = 0U;
 static volatile uint16_t pending_request_id = 0U;
+static volatile uint32_t pending_first_sequence = 0U;
+static volatile uint16_t pending_max_frames = 0U;
+static volatile uint8_t pending_frame_status = RS485_PROTOCOL_STATUS_OK;
 static volatile uint8_t tx_busy = 0U;
-static uint8_t tx_buffer[RS485_PROTOCOL_STATUS_PACKET_SIZE];
+static uint8_t tx_buffer[RS485_PROTOCOL_FRAME_DATA_MAX_PACKET_SIZE];
 
 static volatile uint32_t rx_crc_errors = 0U;
 static volatile uint32_t protocol_errors = 0U;
@@ -121,6 +165,38 @@ static void QueueResponse(uint8_t response_type, uint16_t request_id)
     pending_response_type = response_type;
 }
 
+static void QueueFrameDataResponse(
+    uint16_t request_id,
+    uint32_t first_sequence,
+    uint16_t max_frames,
+    uint8_t status)
+{
+    if ((tx_busy != 0U) || (pending_response_type != 0U))
+    {
+        return;
+    }
+
+    pending_request_id = request_id;
+    pending_first_sequence = first_sequence;
+    pending_max_frames = max_frames;
+    pending_frame_status = status;
+    pending_response_type = RS485_PROTOCOL_MESSAGE_FRAME_DATA;
+}
+
+static uint16_t ReadUint16LittleEndian(const uint8_t *source)
+{
+    return (uint16_t)source[0] |
+           (uint16_t)((uint16_t)source[1] << 8U);
+}
+
+static uint32_t ReadUint32LittleEndian(const uint8_t *source)
+{
+    return (uint32_t)source[0] |
+           ((uint32_t)source[1] << 8U) |
+           ((uint32_t)source[2] << 16U) |
+           ((uint32_t)source[3] << 24U);
+}
+
 static void DispatchPacket(void)
 {
     const uint8_t message_type = rx_header[1];
@@ -155,6 +231,42 @@ static void DispatchPacket(void)
         }
 
         QueueResponse(RS485_PROTOCOL_MESSAGE_STATUS, request_id);
+        return;
+    }
+
+    if (message_type == RS485_PROTOCOL_MESSAGE_READ_FRAMES)
+    {
+        uint32_t first_sequence;
+        uint16_t max_frames;
+
+        if (rx_payload_length !=
+            RS485_PROTOCOL_READ_FRAMES_PAYLOAD_SIZE)
+        {
+            protocol_errors++;
+            return;
+        }
+
+        first_sequence = ReadUint32LittleEndian(&rx_payload[0]);
+        max_frames = ReadUint16LittleEndian(&rx_payload[4]);
+
+        if ((max_frames == 0U) ||
+            (max_frames >
+             RS485_PROTOCOL_MAX_FRAMES_PER_RESPONSE))
+        {
+            protocol_errors++;
+            QueueFrameDataResponse(
+                request_id,
+                first_sequence,
+                max_frames,
+                RS485_PROTOCOL_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+
+        QueueFrameDataResponse(
+            request_id,
+            first_sequence,
+            max_frames,
+            RS485_PROTOCOL_STATUS_OK);
         return;
     }
 
@@ -281,6 +393,30 @@ static void WriteUint64LittleEndian(uint8_t *destination, uint64_t value)
     }
 }
 
+static void SerializeWireFrame(
+    uint8_t *destination,
+    const AcquisitionFrame_t *frame)
+{
+    WriteUint32LittleEndian(&destination[0], frame->sequence);
+    WriteUint64LittleEndian(&destination[4], frame->timestamp_us);
+    destination[12] = frame->enabled_channel_mask;
+    destination[13] = 0U;
+    destination[14] = 0U;
+    destination[15] = 0U;
+
+    for (uint8_t channel = 0U;
+         channel < NODE_CONFIG_CHANNEL_COUNT;
+         channel++)
+    {
+        WriteUint32LittleEndian(
+            &destination[16U + (4U * channel)],
+            frame->raw[channel]);
+        WriteUint32LittleEndian(
+            &destination[32U + (4U * channel)],
+            frame->sample_offset_us[channel]);
+    }
+}
+
 static void SendPong(uint16_t request_id)
 {
     tx_buffer[0] = RS485_PROTOCOL_SYNC0;
@@ -397,6 +533,93 @@ static void SendStatus(uint16_t request_id)
     }
 }
 
+static void SendFrameData(
+    uint16_t request_id,
+    uint32_t first_sequence,
+    uint16_t max_frames,
+    uint8_t status)
+{
+    uint32_t oldest_sequence = RS485_PROTOCOL_NO_SEQUENCE;
+    uint32_t latest_sequence = RS485_PROTOCOL_NO_SEQUENCE;
+    uint32_t sequence = first_sequence;
+    uint16_t frame_count = 0U;
+
+    (void)AcquisitionBuffer_GetOldestSequence(&oldest_sequence);
+    (void)AcquisitionBuffer_GetLatestSequence(&latest_sequence);
+
+    if (status == RS485_PROTOCOL_STATUS_OK)
+    {
+        while (frame_count < max_frames)
+        {
+            AcquisitionFrame_t frame;
+
+            if (!AcquisitionBuffer_GetFrame(sequence, &frame))
+            {
+                if (frame_count == 0U)
+                {
+                    status =
+                        RS485_PROTOCOL_STATUS_DATA_NOT_AVAILABLE;
+                }
+                break;
+            }
+
+            SerializeWireFrame(
+                &tx_buffer[
+                    2U + RS485_PROTOCOL_HEADER_AFTER_SYNC_SIZE +
+                    RS485_PROTOCOL_FRAME_DATA_METADATA_SIZE +
+                    (RS485_PROTOCOL_WIRE_FRAME_SIZE * frame_count)],
+                &frame);
+            frame_count++;
+            sequence++;
+        }
+    }
+
+    const uint16_t payload_size =
+        (uint16_t)(RS485_PROTOCOL_FRAME_DATA_METADATA_SIZE +
+                   (RS485_PROTOCOL_WIRE_FRAME_SIZE * frame_count));
+    const uint16_t packet_size =
+        (uint16_t)(2U + RS485_PROTOCOL_HEADER_AFTER_SYNC_SIZE +
+                   payload_size + 2U);
+
+    tx_buffer[0] = RS485_PROTOCOL_SYNC0;
+    tx_buffer[1] = RS485_PROTOCOL_SYNC1;
+    tx_buffer[2] = AXLESENSE_PROTOCOL_VERSION;
+    tx_buffer[3] = RS485_PROTOCOL_MESSAGE_FRAME_DATA;
+    tx_buffer[4] = configured_node_address;
+    WriteUint16LittleEndian(&tx_buffer[5], request_id);
+    WriteUint16LittleEndian(&tx_buffer[7], payload_size);
+
+    tx_buffer[9] = status;
+    WriteUint32LittleEndian(&tx_buffer[10], first_sequence);
+    WriteUint16LittleEndian(&tx_buffer[14], frame_count);
+    WriteUint32LittleEndian(&tx_buffer[16], oldest_sequence);
+    WriteUint32LittleEndian(&tx_buffer[20], latest_sequence);
+
+    const uint16_t crc = Crc16Calculate(
+        &tx_buffer[2],
+        (uint16_t)(RS485_PROTOCOL_HEADER_AFTER_SYNC_SIZE +
+                   payload_size));
+    WriteUint16LittleEndian(&tx_buffer[9U + payload_size], crc);
+
+    HAL_GPIO_WritePin(
+        RS485_RE_DE_GPIO_Port,
+        RS485_RE_DE_Pin,
+        GPIO_PIN_SET);
+
+    if (HAL_UART_Transmit_IT(
+            protocol_uart,
+            tx_buffer,
+            packet_size) != HAL_OK)
+    {
+        HAL_GPIO_WritePin(
+            RS485_RE_DE_GPIO_Port,
+            RS485_RE_DE_Pin,
+            GPIO_PIN_RESET);
+        tx_busy = 0U;
+        return;
+    }
+}
+
 void Rs485Protocol_Init(
     UART_HandleTypeDef *uart,
     const NodeConfig_t *node_config,
@@ -414,6 +637,9 @@ void Rs485Protocol_Init(
     configured_generation = config_generation;
     pending_response_type = 0U;
     pending_request_id = 0U;
+    pending_first_sequence = 0U;
+    pending_max_frames = 0U;
+    pending_frame_status = RS485_PROTOCOL_STATUS_OK;
     tx_busy = 0U;
     ParserReset();
 
@@ -431,6 +657,9 @@ void Rs485Protocol_Init(
 void Rs485Protocol_Process(void)
 {
     uint16_t request_id = 0U;
+    uint32_t first_sequence = 0U;
+    uint16_t max_frames = 0U;
+    uint8_t frame_status = RS485_PROTOCOL_STATUS_OK;
     uint8_t response_type = 0U;
     const uint32_t interrupt_state = __get_PRIMASK();
 
@@ -438,6 +667,9 @@ void Rs485Protocol_Process(void)
     if ((pending_response_type != 0U) && (tx_busy == 0U))
     {
         request_id = pending_request_id;
+        first_sequence = pending_first_sequence;
+        max_frames = pending_max_frames;
+        frame_status = pending_frame_status;
         response_type = pending_response_type;
         pending_response_type = 0U;
         tx_busy = 1U;
@@ -454,6 +686,14 @@ void Rs485Protocol_Process(void)
     else if (response_type == RS485_PROTOCOL_MESSAGE_STATUS)
     {
         SendStatus(request_id);
+    }
+    else if (response_type == RS485_PROTOCOL_MESSAGE_FRAME_DATA)
+    {
+        SendFrameData(
+            request_id,
+            first_sequence,
+            max_frames,
+            frame_status);
     }
 }
 
