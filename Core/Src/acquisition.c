@@ -3,6 +3,7 @@
 #include "main.h"
 #include "ad7124.h"
 #include "adc_runtime_config.h"
+#include "node_time.h"
 
 #include <stddef.h>
 
@@ -15,6 +16,8 @@ static uint8_t runtime_enabled_channel_mask = 0U;
 static uint32_t last_samples[NODE_CONFIG_CHANNEL_COUNT] = {0U};
 static uint32_t accepted_sample_counts[NODE_CONFIG_CHANNEL_COUNT] = {0U};
 static uint8_t frame_seen_mask = 0U;
+static uint64_t frame_start_time_us = 0U;
+static uint32_t frame_sample_offset_us[NODE_CONFIG_CHANNEL_COUNT];
 static uint8_t runtime_frame_boundary_channel = 0xFFU;
 static AcquisitionFrame_t latest_frame;
 
@@ -65,6 +68,17 @@ static uint32_t noise_max_acc = 0U;
 static double noise_mean_acc = 0.0;
 static double noise_m2_acc = 0.0;
 
+static void ResetFrameTimingState(void)
+{
+    frame_start_time_us = 0U;
+    for (uint8_t channel = 0U;
+         channel < NODE_CONFIG_CHANNEL_COUNT;
+         channel++)
+    {
+        frame_sample_offset_us[channel] = 0xFFFFFFFFU;
+    }
+}
+
 static double NoiseSqrt(double x)
 {
     if (x <= 0.0)
@@ -96,6 +110,8 @@ void Acquisition_Init(
     }
 
     runtime_enabled_channel_mask = node_config->enabled_channel_mask;
+    frame_seen_mask = 0U;
+    ResetFrameTimingState();
     runtime_frame_boundary_channel = 0xFFU;
     for (uint8_t channel = 0U;
          channel < NODE_CONFIG_CHANNEL_COUNT;
@@ -228,6 +244,21 @@ void Acquisition_Process(void)
     }
 
     const uint32_t raw = AD7124_ChannelSamples[channel];
+    const uint64_t sample_time_us = NodeTime_GetUs();
+
+    if (frame_seen_mask == 0U)
+    {
+        frame_start_time_us = sample_time_us;
+        for (uint8_t i = 0U;
+             i < NODE_CONFIG_CHANNEL_COUNT;
+             i++)
+        {
+            frame_sample_offset_us[i] = 0xFFFFFFFFU;
+        }
+    }
+
+    frame_sample_offset_us[channel] =
+        (uint32_t)(sample_time_us - frame_start_time_us);
     last_samples[channel] = raw;
     accepted_sample_counts[channel]++;
 
@@ -248,7 +279,7 @@ void Acquisition_Process(void)
                 next_sequence = 1U;
             }
 
-            latest_frame.timestamp_ms = HAL_GetTick();
+            latest_frame.timestamp_us = frame_start_time_us;
             latest_frame.enabled_channel_mask =
                 runtime_enabled_channel_mask;
             for (uint8_t i = 0U;
@@ -256,11 +287,14 @@ void Acquisition_Process(void)
                  i++)
             {
                 latest_frame.raw[i] = last_samples[i];
+                latest_frame.sample_offset_us[i] =
+                    frame_sample_offset_us[i];
             }
             latest_frame.sequence = next_sequence;
         }
 
         frame_seen_mask = 0U;
+        ResetFrameTimingState();
     }
 
     if (channel != NODE_CONFIG_CHANNEL_STRAIN)

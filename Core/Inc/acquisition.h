@@ -11,9 +11,10 @@ extern "C" {
 typedef struct
 {
     uint32_t sequence;
-    uint32_t timestamp_ms;
+    uint64_t timestamp_us;
     uint8_t enabled_channel_mask;
     uint32_t raw[NODE_CONFIG_CHANNEL_COUNT];
+    uint32_t sample_offset_us[NODE_CONFIG_CHANNEL_COUNT];
 } AcquisitionFrame_t;
 
 extern volatile int32_t adc_runtime_config_status;
