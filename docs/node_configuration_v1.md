@@ -213,7 +213,7 @@ The mapping is fixed by the PCB and firmware and is not payload-configurable.
 
 | Offset | Size | Type | Field | Default | Validation | Permission |
 |---:|---:|---|---|---|---|---|
-| `0x030` | 1 | `uint8` | `enabled_channel_mask` | `0x08` | Only bits 0–3 allowed | Logger |
+| `0x030` | 1 | `uint8` | `enabled_channel_mask` | `0x0F` | Only bits 0–3 allowed | Logger |
 | `0x031` | 1 | `uint8` | `adc_power_mode` | `2` | Enumeration `0–2` | Logger |
 | `0x032` | 1 | `uint8` | `acquisition_mode` | `0` | Supported enumeration only | Logger |
 | `0x033` | 1 | `uint8` | `adc_mapping_version` | `1` | Must be supported | Firmware/manufacturing |
