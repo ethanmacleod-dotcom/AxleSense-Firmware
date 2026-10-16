@@ -1,6 +1,7 @@
 #include "rs485_protocol.h"
 
 #include "acquisition.h"
+#include "acquisition_buffer.h"
 #include "axlesense_version.h"
 #include "main.h"
 #include "node_time.h"
@@ -332,7 +333,9 @@ static void SendPong(uint16_t request_id)
 static void SendStatus(uint16_t request_id)
 {
     uint32_t latest_sequence = RS485_PROTOCOL_NO_SEQUENCE;
+    uint32_t oldest_sequence = RS485_PROTOCOL_NO_SEQUENCE;
     (void)Acquisition_GetLatestSequence(&latest_sequence);
+    (void)AcquisitionBuffer_GetOldestSequence(&oldest_sequence);
 
     tx_buffer[0] = RS485_PROTOCOL_SYNC0;
     tx_buffer[1] = RS485_PROTOCOL_SYNC1;
@@ -351,12 +354,16 @@ static void SendStatus(uint16_t request_id)
     WriteUint64LittleEndian(&tx_buffer[13], NodeTime_GetUs());
     WriteUint32LittleEndian(&tx_buffer[21], 0U);
     WriteUint32LittleEndian(&tx_buffer[25], latest_sequence);
+    WriteUint32LittleEndian(&tx_buffer[29], oldest_sequence);
+    WriteUint16LittleEndian(
+        &tx_buffer[33],
+        AcquisitionBuffer_GetCount());
+    WriteUint16LittleEndian(
+        &tx_buffer[35],
+        AcquisitionBuffer_GetCapacity());
     WriteUint32LittleEndian(
-        &tx_buffer[29],
-        RS485_PROTOCOL_NO_SEQUENCE);
-    WriteUint16LittleEndian(&tx_buffer[33], 0U);
-    WriteUint16LittleEndian(&tx_buffer[35], 0U);
-    WriteUint32LittleEndian(&tx_buffer[37], 0U);
+        &tx_buffer[37],
+        AcquisitionBuffer_GetOverflowCount());
     WriteUint32LittleEndian(
         &tx_buffer[41],
         Acquisition_GetReadErrorCount());

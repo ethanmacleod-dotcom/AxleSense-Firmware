@@ -3,6 +3,7 @@
 #include "main.h"
 #include "ad7124.h"
 #include "adc_runtime_config.h"
+#include "acquisition_buffer.h"
 #include "node_time.h"
 
 #include <stddef.h>
@@ -98,6 +99,7 @@ void Acquisition_Init(
     const NodeConfig_t *node_config)
 {
     adc_runtime_config_status = -99;
+    AcquisitionBuffer_Init();
 
     adc_runtime_config_status = (int32_t)AdcRuntimeConfig_Build(
         node_config,
@@ -291,6 +293,7 @@ void Acquisition_Process(void)
                     frame_sample_offset_us[i];
             }
             latest_frame.sequence = next_sequence;
+            AcquisitionBuffer_Push(&latest_frame);
         }
 
         frame_seen_mask = 0U;
