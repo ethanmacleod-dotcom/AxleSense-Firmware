@@ -16,8 +16,23 @@ REQUEST_ID_STATUS = 0x4001
 REQUEST_ID_FRAMES = 0x4002
 
 FRAME_SIZE = 48
+SEQUENCE_FIRST = 1
+SEQUENCE_MAX = 0xFFFFFFFE
+SEQUENCE_NONE = 0xFFFFFFFF
 FRAME_COUNT_REQUESTED = 20
 
+
+
+def previous_sequence(sequence: int) -> int:
+    if sequence <= SEQUENCE_FIRST:
+        return SEQUENCE_MAX
+    return sequence - 1
+
+
+def next_sequence(sequence: int) -> int:
+    if sequence >= SEQUENCE_MAX or sequence == 0:
+        return SEQUENCE_FIRST
+    return sequence + 1
 
 def crc16_ccitt_false(data: bytes) -> int:
     crc = 0xFFFF
@@ -192,10 +207,9 @@ with serial.Serial(
     #
     # Request the most recent 20 complete frames.
     #
-    first_sequence = (
-        latest_sequence
-        - (FRAME_COUNT_REQUESTED - 1)
-    ) & 0xFFFFFFFF
+    first_sequence = latest_sequence
+    for _ in range(FRAME_COUNT_REQUESTED - 1):
+        first_sequence = previous_sequence(first_sequence)
 
     request_payload = struct.pack(
         "<IH",
@@ -351,9 +365,7 @@ for i in range(frame_count):
 
 for i in range(1, len(sequences)):
 
-    expected = (
-        sequences[i - 1] + 1
-    ) & 0xFFFFFFFF
+    expected = next_sequence(sequences[i - 1])
 
     if sequences[i] != expected:
         raise SystemExit(

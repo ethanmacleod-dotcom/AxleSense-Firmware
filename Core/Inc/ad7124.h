@@ -5,37 +5,29 @@
  * @date    2025-06-15
  * @email   theamiraskarii@gmail.com
  * @see     https://github.com/AmirhoseinAskari
- * @brief   Interrupt-driven driver for the AD7124-4 24-bit Sigma-Delta ADC using STM32 HAL.
+ * @brief   AD7124-4 24-bit Sigma-Delta ADC driver using STM32 HAL SPI.
  *
  * @details
- * This driver enables communication with the AD7124-4 ADC through interrupt-driven SPI transactions.
- * The ADC's DOUT/RDY pin must be connected to an **external interrupt (EXTI)** line on the STM32.
- *
- * The external interrupt must be configured as a **pull-up input** with **falling-edge trigger**,
- * and must be properly enabled in the **NVIC** prior to using this driver.
+ * AxleSense uses the driver's blocking SPI register/data transactions. The
+ * acquisition layer polls STATUS.RDY and then reads the completed conversion;
+ * DOUT/RDY is not configured as an EXTI interrupt in the V1.1 integration.
  *
  * Configure SPI with the following settings:
  * - Clock polarity (CPOL) = 1 (idle high)
  * - Clock phase    (CPHA) = 1 (data captured on second clock edge)
  *
- * The SPI peripheral and all GPIOs (chip select, interrupt lines) must be initialized externally
+ * The SPI peripheral and chip-select GPIO must be initialized externally
  * before using the functions provided in this driver.
  *
  * @note
- * - Set bit 2 (SPI_CRC_ERR_EN) in the AD7124's `error_enable` register to enable CRC error detection.
- * - This driver assumes correct configuration of SPI and external interrupt peripherals.
- *
- * @warning
- * - Improper SPI or EXTI configuration may lead to data loss or undefined ADC behavior.
- * - Ensure the DOUT/RDY pin is correctly connected and configured to generate falling-edge interrupts.
- *
- * @section Supported_Platforms
- * STM32 microcontrollers using HAL drivers.
+ * - Set bit 2 (SPI_CRC_ERR_EN) in the AD7124 error-enable register to enable
+ *   CRC error detection.
+ * - The V1.1 application polls readiness in software; no ADC-ready IRQ is
+ *   required by the current integration.
  *
  * @copyright
  * MIT License. See LICENSE file for details.
  */
-
 
 #ifndef AD7124_H
 #define AD7124_H
@@ -228,7 +220,6 @@ typedef struct
 typedef struct
 {                            
     SPI_HandleTypeDef *SPIx;  /**< Pointer to SPI handle used by STM32 HAL SPI driver */ 
-    IRQn_Type IRQn;           /**< Interrupt request number for SPI interrupts */       
     GPIO_TypeDef *csPort;     /**< GPIO port for chip select (CS) pin */    
     uint16_t csPin;           /**< GPIO pin number for chip select (CS) */   
 } AD7124_ConfigTypeDef;

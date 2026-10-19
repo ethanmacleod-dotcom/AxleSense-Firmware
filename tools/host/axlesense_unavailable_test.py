@@ -17,6 +17,22 @@ REQUEST_ID_FRAMES = 0x3002
 
 DATA_NOT_AVAILABLE = 0x05
 
+SEQUENCE_FIRST = 1
+SEQUENCE_MAX = 0xFFFFFFFE
+SEQUENCE_NONE = 0xFFFFFFFF
+
+
+
+def previous_sequence(sequence: int) -> int:
+    if sequence <= SEQUENCE_FIRST:
+        return SEQUENCE_MAX
+    return sequence - 1
+
+
+def next_sequence(sequence: int) -> int:
+    if sequence >= SEQUENCE_MAX or sequence == 0:
+        return SEQUENCE_FIRST
+    return sequence + 1
 
 def crc16_ccitt_false(data: bytes) -> int:
     crc = 0xFFFF
@@ -131,7 +147,7 @@ with serial.Serial(PORT, BAUD, timeout=2.0) as ser:
         raise SystemExit("Buffer is empty; cannot test an expired sequence")
 
     # Ask for exactly one sequence immediately before the oldest retained frame.
-    unavailable_sequence = (oldest_sequence - 1) & 0xFFFFFFFF
+    unavailable_sequence = previous_sequence(oldest_sequence)
 
     request_payload = struct.pack(
         "<IH",

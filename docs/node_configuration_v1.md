@@ -196,7 +196,10 @@ UART framing is a firmware/protocol property in V1 and is not serialized.
 
 The initial allowed baud rates are `9600`, `19200`, `38400`, `57600`,
 `115200`, `230400`, `460800`, and `921600`. Firmware may support a subset but
-must reject an unsupported value instead of silently substituting one.
+must reject an unsupported value instead of silently substituting one. The
+selected baud rate is applied during boot before the RS-485 protocol receiver is
+started. Until runtime configuration commands are implemented, changing the
+persisted baud rate requires a controlled configuration save and reboot.
 
 ### 2.4 Fixed logical channel mapping
 
@@ -204,9 +207,9 @@ The mapping is fixed by the PCB and firmware and is not payload-configurable.
 
 | Logical channel | Sensor | Physical ADC input |
 |---:|---|---|
-| 0 | Accelerometer X | AIN0 to AVSS |
-| 1 | Accelerometer Y | AIN1 to AVSS |
-| 2 | Accelerometer Z | AIN2 to AVSS |
+| 0 | Accelerometer X | AIN2 to AVSS |
+| 1 | Accelerometer Y | AIN3 to AVSS |
+| 2 | Accelerometer Z | AIN0 to AVSS |
 | 3 | Strain | AIN4/AIN5 differential |
 
 ### 2.5 ADC and acquisition configuration
@@ -229,7 +232,16 @@ The mapping is fixed by the PCB and firmware and is not payload-configurable.
 `adc_power_mode` values are 0 low power, 1 mid power, and 2 full power.
 
 `acquisition_mode` value 0 is a firmware-controlled continuous scan of enabled
-channels. Other values are reserved.
+channels. Other values are reserved. `startup_settling_conversions` is applied at
+startup by discarding that many accepted ADC conversions before the first frame
+is published.
+
+`NodeConfig_Validate()` checks the serialized schema and field ranges. Runtime
+ADC support is a second validation layer. In the current V1.1 firmware,
+`AdcRuntimeConfig_Build()` supports the validated production profile: full-power
+ADC mode, continuous acquisition, gains `{1,1,1,64}`, default filter semantics,
+zero filter-option bits, and zero explicit output-rate overrides. Unsupported
+profiles are rejected rather than silently mapped to a different ADC setup.
 
 `filter_mode` is a semantic setting:
 

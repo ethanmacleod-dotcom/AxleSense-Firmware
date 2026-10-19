@@ -1,9 +1,9 @@
 #include "acquisition.h"
 
-#include "main.h"
+#include "acquisition_buffer.h"
 #include "ad7124.h"
 #include "adc_runtime_config.h"
-#include "acquisition_buffer.h"
+#include "main.h"
 #include "node_time.h"
 
 #include <stddef.h>
@@ -15,59 +15,14 @@ extern volatile uint8_t AD7124_LastActiveChannel;
 static AD7124_RegisterTypeDef runtime_adc_config;
 static uint8_t runtime_enabled_channel_mask = 0U;
 static uint32_t last_samples[NODE_CONFIG_CHANNEL_COUNT] = {0U};
-static uint32_t accepted_sample_counts[NODE_CONFIG_CHANNEL_COUNT] = {0U};
 static uint8_t frame_seen_mask = 0U;
 static uint64_t frame_start_time_us = 0U;
 static uint32_t frame_sample_offset_us[NODE_CONFIG_CHANNEL_COUNT];
 static uint8_t runtime_frame_boundary_channel = 0xFFU;
+static uint16_t startup_settling_remaining = 0U;
 static AcquisitionFrame_t latest_frame;
-
-/* ADC initialization status: AD7124_OK should be 0. */
-volatile int32_t adc_runtime_config_status = -99;
-volatile int32_t adc_reset_status  = -99;
-volatile int32_t adc_config_status = -99;
-
-/* Fixed-order PCB register readback.
- * rb_seq[0] = ID
- * rb_seq[1] = CH3_MAP
- * rb_seq[2] = CFG1
- * rb_seq[3] = FILT1
- * rb_seq[4] = ADC_CONTROL
- * rb_seq[5] = ERROR_EN
- */
-volatile uint32_t rb_magic = 0x12345678U;
-volatile uint32_t rb_seq[6] = {0U};
-volatile int32_t  rb_st_seq[6] = {-99, -99, -99, -99, -99, -99};
-volatile uint8_t  rb_all_reads_ok = 0U;
-
-/* Live conversion diagnostics. */
-volatile uint32_t adc_read_errors   = 0U;
-volatile uint32_t adc_samples_total = 0U;
-volatile uint32_t adc_last_raw      = 0U;
-volatile uint32_t adc_last_status   = 0U;
-volatile uint8_t  adc_last_channel  = 0xFFU;
-
-/* One-shot strain-input noise measurement. */
-volatile uint8_t  noise_done = 0U;
-volatile uint32_t noise_window_samples = 0U;
-volatile uint32_t noise_raw_min = 0U;
-volatile uint32_t noise_raw_max = 0U;
-volatile double noise_mean_code = 0.0;
-volatile double noise_std_code  = 0.0;
-volatile double noise_pp_code   = 0.0;
-
-/* Input-referred estimates use nominal AVDD = 3.3 V and PGA = 64. */
-volatile double noise_mean_uV = 0.0;
-volatile double noise_std_uV  = 0.0;
-volatile double noise_pp_uV   = 0.0;
-
-/* Internal Welford accumulators. */
-static uint32_t noise_skip = 256U;
-static uint32_t noise_n = 0U;
-static uint32_t noise_min_acc = 0xFFFFFFU;
-static uint32_t noise_max_acc = 0U;
-static double noise_mean_acc = 0.0;
-static double noise_m2_acc = 0.0;
+static uint8_t acquisition_ready = 0U;
+static uint32_t adc_read_errors = 0U;
 
 static void ResetFrameTimingState(void)
 {
@@ -80,40 +35,39 @@ static void ResetFrameTimingState(void)
     }
 }
 
-static double NoiseSqrt(double x)
-{
-    if (x <= 0.0)
-    {
-        return 0.0;
-    }
-    double g = (x > 1.0) ? x : 1.0;
-    for (uint8_t i = 0U; i < 16U; i++)
-    {
-        g = 0.5 * (g + x / g);
-    }
-    return g;
-}
-
 void Acquisition_Init(
     SPI_HandleTypeDef *spi,
     const NodeConfig_t *node_config)
 {
-    adc_runtime_config_status = -99;
+    acquisition_ready = 0U;
+    adc_read_errors = 0U;
     AcquisitionBuffer_Init();
 
-    adc_runtime_config_status = (int32_t)AdcRuntimeConfig_Build(
-        node_config,
-        &runtime_adc_config);
-
-    if (adc_runtime_config_status != (int32_t)ADC_RUNTIME_CONFIG_OK)
+    if ((spi == NULL) || (node_config == NULL))
     {
-        adc_config_status = -1;
+        return;
+    }
+
+    if (AdcRuntimeConfig_Build(
+            node_config,
+            &runtime_adc_config) != ADC_RUNTIME_CONFIG_OK)
+    {
         return;
     }
 
     runtime_enabled_channel_mask = node_config->enabled_channel_mask;
+    startup_settling_remaining = node_config->startup_settling_conversions;
+    latest_frame = (AcquisitionFrame_t){0};
     frame_seen_mask = 0U;
     ResetFrameTimingState();
+
+    for (uint8_t channel = 0U;
+         channel < NODE_CONFIG_CHANNEL_COUNT;
+         channel++)
+    {
+        last_samples[channel] = 0U;
+    }
+
     runtime_frame_boundary_channel = 0xFFU;
     for (uint8_t channel = 0U;
          channel < NODE_CONFIG_CHANNEL_COUNT;
@@ -124,91 +78,40 @@ void Acquisition_Init(
             runtime_frame_boundary_channel = channel;
         }
     }
-    /*
-     * PCB AD7124 bring-up test.
-     *
-     * Hardware under test:
-     *   SPI1
-     *   CS = AD7124_CS_Pin
-     *   strain = CH3, AIN4(+) versus AIN5(-), Setup1
-     *
-     * SPI1 should be Mode 3 and /64 in the IOC for this reproduction test.
-     */
-    HAL_GPIO_WritePin(AD7124_CS_GPIO_Port, AD7124_CS_Pin, GPIO_PIN_SET);
-    AD7124_Handler.SPIx   = spi;
+
+    HAL_GPIO_WritePin(
+        AD7124_CS_GPIO_Port,
+        AD7124_CS_Pin,
+        GPIO_PIN_SET);
+
+    AD7124_Handler.SPIx = spi;
     AD7124_Handler.csPort = AD7124_CS_GPIO_Port;
-    AD7124_Handler.csPin  = AD7124_CS_Pin;
+    AD7124_Handler.csPin = AD7124_CS_Pin;
 
-    /* Reproduce the known previous-PCB driver sequence. */
-    adc_reset_status =
-        (int32_t)AD7124_Reset(&AD7124_Handler, 100U);
-    adc_config_status =
-        (int32_t)AD7124_Config(&AD7124_Handler, &runtime_adc_config);
-
-    /*
-     * Fixed-order readback. These are the PCB-specific values we care about:
-     *
-     *   ID          approximately 0x06
-     *   CH3_MAP     0x9085  = Setup1, AIN4 vs AIN5
-     *   CFG1        0x087E  = bipolar, buffered, AVDD ref, gain 64
-     *   FILT1       0x460015
-     *   ADC_CONTROL 0x0080
-     *   ERROR_EN    0x000004
-     *
-     * Every read uses the recovered driver, including its CRC checking.
-     */
-    uint32_t rb_tmp = 0U;
-    rb_magic = 0xA5A5A5A5U;
-    rb_tmp = 0U;
-    rb_st_seq[0] = (int32_t)AD7124_ReadRegister(
-        &AD7124_Handler, 0x05U, 1U, &rb_tmp);
-    rb_seq[0] = rb_tmp;
-    rb_tmp = 0U;
-    rb_st_seq[1] = (int32_t)AD7124_ReadRegister(
-        &AD7124_Handler, AD7124_CH3_MAP_REG, 2U, &rb_tmp);
-    rb_seq[1] = rb_tmp;
-    rb_tmp = 0U;
-    rb_st_seq[2] = (int32_t)AD7124_ReadRegister(
-        &AD7124_Handler, AD7124_CFG1_REG, 2U, &rb_tmp);
-    rb_seq[2] = rb_tmp;
-    rb_tmp = 0U;
-    rb_st_seq[3] = (int32_t)AD7124_ReadRegister(
-        &AD7124_Handler, AD7124_FILT1_REG, 3U, &rb_tmp);
-    rb_seq[3] = rb_tmp;
-    rb_tmp = 0U;
-    rb_st_seq[4] = (int32_t)AD7124_ReadRegister(
-        &AD7124_Handler, AD7124_CONTROL_REG, 2U, &rb_tmp);
-    rb_seq[4] = rb_tmp;
-    rb_tmp = 0U;
-    rb_st_seq[5] = (int32_t)AD7124_ReadRegister(
-        &AD7124_Handler, AD7124_ERREN_REG, 3U, &rb_tmp);
-    rb_seq[5] = rb_tmp;
-    rb_all_reads_ok = 1U;
-    for (uint8_t i = 0U; i < 6U; i++)
+    if (AD7124_Reset(&AD7124_Handler, 100U) != AD7124_OK)
     {
-        if (rb_st_seq[i] != (int32_t)AD7124_OK)
-        {
-            rb_all_reads_ok = 0U;
-        }
+        return;
     }
 
-    /*
-     * FIRST STOP:
-     * Inspect adc_reset_status, adc_config_status, rb_seq[], rb_st_seq[],
-     * rb_all_reads_ok, and the AD7124_DebugLastRead* globals.
-     *
-     * Press Resume to continue into the strain-only noise test.
-     */
+    if (AD7124_Config(
+            &AD7124_Handler,
+            &runtime_adc_config) != AD7124_OK)
+    {
+        return;
+    }
+
+    acquisition_ready = 1U;
 }
 
 void Acquisition_Process(void)
 {
     uint32_t status_reg = 0U;
 
-    /*
-     * Read STATUS once. With the strain-only ADC config, CH3 is the only
-     * enabled conversion channel.
-     */
+    if (acquisition_ready == 0U)
+    {
+        return;
+    }
+
     if (AD7124_ReadRegister(
             &AD7124_Handler,
             AD7124_STATUS_REG,
@@ -218,7 +121,6 @@ void Acquisition_Process(void)
         adc_read_errors++;
         return;
     }
-    adc_last_status = status_reg;
 
     /* STATUS.RDY is active low. */
     if ((status_reg & 0x80U) != 0U)
@@ -245,6 +147,13 @@ void Acquisition_Process(void)
         return;
     }
 
+    /* Discard the configured number of accepted conversions after startup. */
+    if (startup_settling_remaining > 0U)
+    {
+        startup_settling_remaining--;
+        return;
+    }
+
     const uint32_t raw = AD7124_ChannelSamples[channel];
     const uint64_t sample_time_us = NodeTime_GetUs();
 
@@ -262,12 +171,6 @@ void Acquisition_Process(void)
     frame_sample_offset_us[channel] =
         (uint32_t)(sample_time_us - frame_start_time_us);
     last_samples[channel] = raw;
-    accepted_sample_counts[channel]++;
-
-    adc_last_channel = channel;
-    adc_last_raw = raw;
-    adc_samples_total++;
-
     frame_seen_mask |= (uint8_t)(1U << channel);
 
     if (channel == runtime_frame_boundary_channel)
@@ -275,15 +178,12 @@ void Acquisition_Process(void)
         if ((frame_seen_mask & runtime_enabled_channel_mask) ==
             runtime_enabled_channel_mask)
         {
-            uint32_t next_sequence = latest_frame.sequence + 1U;
-            if (next_sequence == 0U)
-            {
-                next_sequence = 1U;
-            }
-
+            latest_frame.sequence =
+                Acquisition_SequenceNext(latest_frame.sequence);
             latest_frame.timestamp_us = frame_start_time_us;
             latest_frame.enabled_channel_mask =
                 runtime_enabled_channel_mask;
+
             for (uint8_t i = 0U;
                  i < NODE_CONFIG_CHANNEL_COUNT;
                  i++)
@@ -292,120 +192,29 @@ void Acquisition_Process(void)
                 latest_frame.sample_offset_us[i] =
                     frame_sample_offset_us[i];
             }
-            latest_frame.sequence = next_sequence;
+
             AcquisitionBuffer_Push(&latest_frame);
         }
 
         frame_seen_mask = 0U;
         ResetFrameTimingState();
     }
-
-    if (channel != NODE_CONFIG_CHANNEL_STRAIN)
-    {
-        return;
-    }
-
-    if (noise_done != 0U)
-    {
-        return;
-    }
-
-    /* Allow the digital filter to settle before collecting statistics. */
-    if (noise_skip > 0U)
-    {
-        noise_skip--;
-        return;
-    }
-
-    if (noise_n == 0U)
-    {
-        noise_min_acc = raw;
-        noise_max_acc = raw;
-        noise_mean_acc = 0.0;
-        noise_m2_acc = 0.0;
-    }
-    if (raw < noise_min_acc)
-    {
-        noise_min_acc = raw;
-    }
-    if (raw > noise_max_acc)
-    {
-        noise_max_acc = raw;
-    }
-
-    /* Welford running mean and variance. */
-    noise_n++;
-    const double x = (double)raw;
-    const double delta = x - noise_mean_acc;
-    noise_mean_acc += delta / (double)noise_n;
-    const double delta2 = x - noise_mean_acc;
-    noise_m2_acc += delta * delta2;
-
-    if (noise_n >= 2048U)
-    {
-        const double variance =
-            noise_m2_acc / (double)(noise_n - 1U);
-        const double std_codes = NoiseSqrt(variance);
-        const double pp_codes =
-            (double)(noise_max_acc - noise_min_acc);
-
-        /*
-         * CONFIG1 uses AVDD as Vref and gain 64.
-         * For a bipolar code:
-         *   Vin = ((code / 8388608) - 1) * Vref / gain
-         *
-         * AVDD is nominally 3.3 V, so the uV values are nominal
-         * input-referred estimates. Raw-code statistics remain exact.
-         */
-        const double nominal_vref_V = 3.3;
-        const double pga_gain = 64.0;
-        const double code_to_uV =
-            (nominal_vref_V / (pga_gain * 8388608.0)) * 1.0e6;
-        noise_window_samples = noise_n;
-        noise_raw_min = noise_min_acc;
-        noise_raw_max = noise_max_acc;
-        noise_mean_code = noise_mean_acc;
-        noise_std_code  = std_codes;
-        noise_pp_code   = pp_codes;
-        noise_mean_uV =
-            ((noise_mean_acc / 8388608.0) - 1.0) *
-            (nominal_vref_V / pga_gain) *
-            1.0e6;
-        noise_std_uV = std_codes * code_to_uV;
-        noise_pp_uV  = pp_codes  * code_to_uV;
-        noise_done = 1U;
-
-        /*
-         * SECOND STOP:
-         * Inspect noise_* plus adc_samples_total and adc_read_errors.
-         */
-    }
 }
 
-uint8_t Acquisition_IsComplete(void)
+uint8_t Acquisition_IsReady(void)
 {
-    return noise_done;
+    return acquisition_ready;
 }
 
-uint8_t Acquisition_GetLatestFrame(
-    AcquisitionFrame_t *frame,
-    uint32_t *last_sequence)
+uint32_t Acquisition_SequenceNext(uint32_t sequence)
 {
-    if ((frame == NULL) || (last_sequence == NULL))
+    if ((sequence == 0U) ||
+        (sequence >= ACQUISITION_SEQUENCE_MAX))
     {
-        return 0U;
+        return ACQUISITION_SEQUENCE_FIRST;
     }
 
-    if ((latest_frame.sequence == 0U) ||
-        (latest_frame.sequence == *last_sequence))
-    {
-        return 0U;
-    }
-
-    *frame = latest_frame;
-    *last_sequence = latest_frame.sequence;
-
-    return 1U;
+    return sequence + 1U;
 }
 
 uint8_t Acquisition_GetLatestSequence(uint32_t *sequence)

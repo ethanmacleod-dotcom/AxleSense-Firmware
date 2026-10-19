@@ -43,13 +43,13 @@ with serial.Serial(PORT, BAUD, timeout=1.0) as ser:
     ser.write(packet)
     ser.flush()
 
-    response = ser.read(63)
+    response = ser.read(67)
 
 print("RX bytes:", len(response))
 print("RX:", response.hex(" ").upper())
 
-if len(response) != 63:
-    raise SystemExit("Did not receive complete 63-byte STATUS packet")
+if len(response) != 67:
+    raise SystemExit("Did not receive complete 67-byte STATUS packet")
 
 if response[0:2] != b"\xAA\x55":
     raise SystemExit("Bad sync")
@@ -71,7 +71,7 @@ if calculated_crc != received_crc:
 if message_type != 0x82:
     raise SystemExit(f"Unexpected response type: 0x{message_type:02X}")
 
-if payload_length != 52:
+if payload_length != 56:
     raise SystemExit(f"Unexpected payload length: {payload_length}")
 
 payload = response[9:-2]
@@ -92,7 +92,7 @@ adc_read_errors = struct.unpack_from("<I", payload, 32)[0]
 rx_crc_errors = struct.unpack_from("<I", payload, 36)[0]
 protocol_errors = struct.unpack_from("<I", payload, 40)[0]
 fault_flags = struct.unpack_from("<I", payload, 44)[0]
-config_generation = struct.unpack_from("<I", payload, 48)[0]
+config_generation = struct.unpack_from("<Q", payload, 48)[0]
 
 state_names = {
     0: "IDLE",

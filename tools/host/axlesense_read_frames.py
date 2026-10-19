@@ -16,8 +16,23 @@ REQUEST_ID_STATUS = 0x2001
 REQUEST_ID_FRAMES = 0x2002
 
 FRAME_SIZE = 48
+SEQUENCE_FIRST = 1
+SEQUENCE_MAX = 0xFFFFFFFE
+SEQUENCE_NONE = 0xFFFFFFFF
 MAX_FRAMES = 5
 
+
+
+def previous_sequence(sequence: int) -> int:
+    if sequence <= SEQUENCE_FIRST:
+        return SEQUENCE_MAX
+    return sequence - 1
+
+
+def next_sequence(sequence: int) -> int:
+    if sequence >= SEQUENCE_MAX or sequence == 0:
+        return SEQUENCE_FIRST
+    return sequence + 1
 
 def crc16_ccitt_false(data: bytes) -> int:
     crc = 0xFFFF
@@ -168,11 +183,10 @@ with serial.Serial(PORT, BAUD, timeout=2.0) as ser:
     if latest_sequence == 0xFFFFFFFF:
         raise SystemExit("No frames available")
 
-    # Pick five recent frames safely inside the retained window.
-    if latest_sequence >= (MAX_FRAMES - 1):
-        first_sequence = latest_sequence - (MAX_FRAMES - 1)
-    else:
-        first_sequence = oldest_sequence
+    # Pick the five newest frames, including across sequence rollover.
+    first_sequence = latest_sequence
+    for _ in range(MAX_FRAMES - 1):
+        first_sequence = previous_sequence(first_sequence)
 
     payload = struct.pack(
         "<IH",
